@@ -8,6 +8,7 @@ using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
+using HarmonyLib;
 using Il2CppInterop.Runtime.Injection;
 using TMPro;
 using UnityEngine;
@@ -21,67 +22,120 @@ public sealed class CrispChineseFontPlugin : BasePlugin
 {
     public const string PluginGuid = "local.lostcastle2.crispchinesefont";
     public const string PluginName = "Lost Castle 2 Crisp Chinese Font";
-    public const string PluginVersion = "0.1.2";
+    public const string PluginVersion = "0.3.1";
 
     internal static ManualLogSource LogSource = null!;
-    internal static ConfigEntry<string> FontCandidates = null!;
     internal static ConfigEntry<string> FontFilePath = null!;
+    internal static ConfigEntry<string> SourceHanAsciiFontFilePath = null!;
+    internal static ConfigEntry<string> BossTitleFontFilePath = null!;
+    internal static ConfigEntry<string> TraditionalChineseFontFilePath = null!;
+    internal static ConfigEntry<string> JapaneseFontFilePath = null!;
+    internal static ConfigEntry<string> KoreanFontFilePath = null!;
     internal static ConfigEntry<int> SamplingPointSize = null!;
     internal static ConfigEntry<int> AtlasPadding = null!;
     internal static ConfigEntry<int> AtlasWidth = null!;
     internal static ConfigEntry<int> AtlasHeight = null!;
     internal static ConfigEntry<float> Sharpness = null!;
-    internal static ConfigEntry<bool> ReplaceAllTmpText = null!;
     internal static ConfigEntry<bool> ReplaceLegacyUiText = null!;
     internal static ConfigEntry<bool> PreloadLocalizationGlyphs = null!;
     internal static ConfigEntry<float> ScanIntervalSeconds = null!;
     internal static ConfigEntry<int> MaxPreloadChars = null!;
-    internal static ConfigEntry<bool> TryOsFonts = null!;
+    internal static ConfigEntry<bool> PreferEmbeddedSourceFont = null!;
+    internal static ConfigEntry<bool> EnableImmediateHooks = null!;
+
+    private Harmony _harmony;
 
     public override void Load()
     {
         LogSource = Log;
         BindConfig();
         ClassInjector.RegisterTypeInIl2Cpp<CrispChineseFontRuntime>();
+        InstallHooks();
         AddComponent<CrispChineseFontRuntime>();
         Log.LogInfo($"{PluginName} {PluginVersion} loaded.");
     }
 
     private void BindConfig()
     {
-        FontCandidates = Config.Bind(
-            "Font",
-            "FontCandidates",
-            "AlibabaPuHuiTi|Alibaba PuHuiTi|Microsoft YaHei UI|Microsoft YaHei|Noto Sans CJK SC|Source Han Sans SC|SimHei",
-            "Preferred font name tokens, separated by '|'. Used when selecting loaded fonts.");
         FontFilePath = Config.Bind(
             "Font",
             "FontFilePath",
             "BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
-            "Font file path. Relative paths are resolved from the game directory.");
+            "Font file path for the game's AlibabaPuHuiTi Simplified Chinese TMP profile. Relative paths are resolved from the game directory.");
+        SourceHanAsciiFontFilePath = Config.Bind(
+            "Font",
+            "SourceHanAsciiFontFilePath",
+            "BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/Alibaba-PuHuiTi-Bold.ttf",
+            "Font file path for the game's SourceHanSansCN Simplified Chinese TMP profile. Relative paths are resolved from the game directory.");
+        BossTitleFontFilePath = Config.Bind(
+            "Font",
+            "BossTitleFontFilePath",
+            "BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/AlibabaPuHuiTi-3-85-Bold.ttf",
+            "Font file path for the game's BossTitle TMP profile. Relative paths are resolved from the game directory.");
+        TraditionalChineseFontFilePath = Config.Bind(
+            "Font",
+            "TraditionalChineseFontFilePath",
+            "",
+            "Optional font file path for the game's Traditional Chinese TMP profile. Empty means embedded/loaded source fonts only.");
+        JapaneseFontFilePath = Config.Bind(
+            "Font",
+            "JapaneseFontFilePath",
+            "",
+            "Optional font file path for the game's Japanese TMP profile. Empty means embedded/loaded source fonts only.");
+        KoreanFontFilePath = Config.Bind(
+            "Font",
+            "KoreanFontFilePath",
+            "BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/AlibabaSansKR-Bold.ttf",
+            "Font file path for the game's Korean TMP profile. Relative paths are resolved from the game directory.");
         SamplingPointSize = Config.Bind("Font", "SamplingPointSize", 56, "TMP dynamic SDF sampling point size.");
         AtlasPadding = Config.Bind("Font", "AtlasPadding", 9, "TMP dynamic SDF atlas padding.");
         AtlasWidth = Config.Bind("Font", "AtlasWidth", 4096, "TMP dynamic SDF atlas width.");
         AtlasHeight = Config.Bind("Font", "AtlasHeight", 4096, "TMP dynamic SDF atlas height.");
         Sharpness = Config.Bind("Material", "Sharpness", 0.08f, "TMP material sharpness. Try 0.05 to 0.15.");
-        ReplaceAllTmpText = Config.Bind("Apply", "ReplaceAllTmpText", false, "Replace all TMP_Text. False only replaces texts containing CJK characters.");
-        ReplaceLegacyUiText = Config.Bind("Apply", "ReplaceLegacyUiText", true, "Also replace legacy UnityEngine.UI.Text when it contains CJK characters.");
-        PreloadLocalizationGlyphs = Config.Bind("Apply", "PreloadLocalizationGlyphs", true, "Preload CJK glyphs found in StreamingAssets/Localization JSON files.");
-        ScanIntervalSeconds = Config.Bind("Apply", "ScanIntervalSeconds", 1.5f, "How often loaded text objects are scanned.");
-        MaxPreloadChars = Config.Bind("Apply", "MaxPreloadChars", 5000, "Maximum unique CJK characters to preload from localization files.");
-        TryOsFonts = Config.Bind("Compatibility", "TryOsFonts", false, "Try Unity OS font APIs. Disabled by default because Unity 6000 IL2CPP commonly strips these methods.");
+        ReplaceLegacyUiText = Config.Bind("Apply", "ReplaceLegacyUiText", true, "Also replace legacy UnityEngine.UI.Text when it contains East Asian characters.");
+        PreloadLocalizationGlyphs = Config.Bind("Apply", "PreloadLocalizationGlyphs", true, "Preload East Asian glyphs found in StreamingAssets/Localization JSON files.");
+        ScanIntervalSeconds = Config.Bind("Apply", "ScanIntervalSeconds", 1.5f, "How often loaded text objects are scanned as a fallback.");
+        MaxPreloadChars = Config.Bind("Apply", "MaxPreloadChars", 5000, "Maximum unique East Asian characters to preload from localization files.");
+        PreferEmbeddedSourceFont = Config.Bind("Apply", "PreferEmbeddedSourceFont", true, "Prefer each original TMP font asset's embedded source Font before configured TTF files.");
+        EnableImmediateHooks = Config.Bind("Apply", "EnableImmediateHooks", true, "Patch TMP_Text immediately from Harmony hooks. Periodic scanning remains as a fallback.");
+    }
+
+    private void InstallHooks()
+    {
+        if (!EnableImmediateHooks.Value)
+        {
+            return;
+        }
+
+        try
+        {
+            _harmony = new Harmony(PluginGuid);
+            var patchedCount = TextMeshProHooks.Install(_harmony);
+            Log.LogInfo($"Installed {patchedCount} TMP_Text immediate hook(s).");
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"TMP_Text immediate hooks failed; periodic scanning will still work. {ex.GetBaseException().Message}");
+        }
     }
 }
 
 public sealed class CrispChineseFontRuntime : MonoBehaviour
 {
-    private TMP_FontAsset _tmpFont;
+    private static CrispChineseFontRuntime _instance;
+
+    private readonly Dictionary<string, TMP_FontAsset> _replacementFonts = new();
+    private readonly Dictionary<string, Material> _replacementMaterials = new();
+    private readonly Dictionary<int, TMP_Text> _pendingHookTexts = new();
+    private readonly HashSet<int> _replacementFontIds = new();
+    private readonly HashSet<int> _preloadedFontIds = new();
+    private readonly HashSet<string> _loggedMissingProfiles = new();
     private Font _legacyFont;
     private float _nextScanTime;
-    private float _nextFontRetryTime;
     private int _lastTmpCount;
     private int _lastLegacyCount;
-    private bool _preloadedGlyphs;
+    private bool _triedLegacyFont;
+    private bool _isPatching;
 
     public CrispChineseFontRuntime(IntPtr ptr)
         : base(ptr)
@@ -90,28 +144,33 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
 
     private void Awake()
     {
+        _instance = this;
         DontDestroyOnLoad(gameObject);
-        TryCreateFonts();
-        TryPreloadLocalizationGlyphs();
+        TryCreateLegacyFont();
+    }
+
+    private void OnDestroy()
+    {
+        if (_instance == this)
+        {
+            _instance = null;
+        }
+    }
+
+    internal static void QueueFromHook(TMP_Text text)
+    {
+        var instance = _instance;
+        if (instance == null || text == null)
+        {
+            return;
+        }
+
+        instance.QueueTmpText(text);
     }
 
     private void Update()
     {
-        if (_tmpFont == null)
-        {
-            if (Time.unscaledTime >= _nextFontRetryTime)
-            {
-                _nextFontRetryTime = Time.unscaledTime + Math.Max(1f, CrispChineseFontPlugin.ScanIntervalSeconds.Value);
-                if (TryCreateFonts())
-                {
-                    TryPreloadLocalizationGlyphs();
-                }
-            }
-
-            return;
-        }
-
-        TryPreloadLocalizationGlyphs();
+        ApplyQueuedText();
 
         if (Time.unscaledTime < _nextScanTime)
         {
@@ -122,114 +181,164 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         ApplyToLoadedText();
     }
 
-    private bool TryCreateFonts()
+    private void TryCreateLegacyFont()
     {
+        if (_triedLegacyFont || _legacyFont != null)
+        {
+            return;
+        }
+
+        _triedLegacyFont = true;
+        _legacyFont = TryCreateFontFromFile(CrispChineseFontPlugin.FontFilePath.Value);
+    }
+
+    private void QueueTmpText(TMP_Text text)
+    {
+        if (text == null || _isPatching)
+        {
+            return;
+        }
+
+        _pendingHookTexts[text.GetInstanceID()] = text;
+    }
+
+    private void ApplyQueuedText()
+    {
+        if (_pendingHookTexts.Count == 0)
+        {
+            return;
+        }
+
+        var pending = _pendingHookTexts.Values.ToArray();
+        _pendingHookTexts.Clear();
+
+        foreach (var text in pending)
+        {
+            if (text != null)
+            {
+                TryPatchTmpText(text);
+            }
+        }
+    }
+
+    private TMP_FontAsset GetOrCreateReplacementFont(TMP_FontAsset originalFont, string profileKey)
+    {
+        if (_replacementFonts.TryGetValue(profileKey, out var existingFont) && existingFont != null)
+        {
+            return existingFont;
+        }
+
+        var originalFontName = SafeObjectName(originalFont);
+        var fontPath = GetFontPathForProfile(profileKey);
+        var replacementFont =
+            TryCreateTmpFontAssetFromOriginalSource(originalFont, profileKey, originalFontName) ??
+            TryCreateTmpFontAssetFromLoadedFont(profileKey, originalFontName) ??
+            TryCreateTmpFontAssetFromFile(fontPath, profileKey, originalFontName);
+        if (replacementFont == null)
+        {
+            LogMissingProfileOnce(
+                profileKey,
+                $"No high-resolution replacement could be created for profile '{profileKey}' from embedded source, loaded fonts, or configured path '{fontPath}'.");
+            return null;
+        }
+
+        _replacementFonts[profileKey] = replacementFont;
+        _replacementFontIds.Add(replacementFont.GetInstanceID());
+        TryPreloadLocalizationGlyphs(replacementFont);
+        return replacementFont;
+    }
+
+    private TMP_FontAsset TryCreateTmpFontAssetFromOriginalSource(TMP_FontAsset originalFont, string profileKey, string originalFontName)
+    {
+        if (!CrispChineseFontPlugin.PreferEmbeddedSourceFont.Value || originalFont == null)
+        {
+            return null;
+        }
+
         try
         {
-            CreateFonts();
-            return _tmpFont != null;
+            var sourceFont = originalFont.sourceFontFile;
+            if (sourceFont == null)
+            {
+                return null;
+            }
+
+            return TryCreateTmpFontAssetFromFont(sourceFont, profileKey, originalFontName, $"embedded source Font '{SafeFontName(sourceFont)}'");
         }
         catch (Exception ex)
         {
-            _tmpFont = null;
-            CrispChineseFontPlugin.LogSource.LogError($"Font initialization failed: {ex}");
-            return false;
+            CrispChineseFontPlugin.LogSource.LogWarning(
+                $"Original TMP font '{originalFontName}' has no usable embedded source Font: {GetBaseMessage(ex)}");
+            return null;
         }
     }
 
-    private void CreateFonts()
+    private static TMP_FontAsset TryCreateTmpFontAssetFromLoadedFont(string profileKey, string originalFontName)
     {
-        if (_tmpFont != null)
+        var tokens = GetSourceFontNameTokens(profileKey);
+        if (tokens.Length == 0)
         {
-            return;
+            return null;
         }
 
-        var fontNames = GetConfiguredFontNames();
-
-        _tmpFont = TryCreateTmpFontAssetFromFile();
-        if (_tmpFont != null)
+        var fonts = Resources.FindObjectsOfTypeAll<Font>();
+        if (fonts == null || fonts.Length == 0)
         {
-            return;
+            return null;
         }
 
-        _legacyFont = TryCreateFontFromFile();
-        if (_legacyFont == null)
+        foreach (var token in tokens)
         {
-            _legacyFont = TryFindSourceFontFromLoadedTmpFontAsset(fontNames);
+            foreach (var font in fonts)
+            {
+                if (font == null)
+                {
+                    continue;
+                }
+
+                var loadedName = SafeFontName(font);
+                if (!string.IsNullOrEmpty(loadedName) &&
+                    loadedName.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return TryCreateTmpFontAssetFromFont(font, profileKey, originalFontName, $"loaded Unity Font '{loadedName}'");
+                }
+            }
         }
 
-        if (_legacyFont == null)
-        {
-            _legacyFont = TryFindLoadedFont(fontNames);
-        }
-
-        if (_legacyFont == null && CrispChineseFontPlugin.TryOsFonts.Value)
-        {
-            _legacyFont = TryCreateDynamicFontFromOs(fontNames);
-        }
-
-        if (_legacyFont == null)
-        {
-            _tmpFont = TryFindLoadedTmpFontAsset(fontNames);
-        }
-
-        if (_legacyFont == null && _tmpFont == null)
-        {
-            CrispChineseFontPlugin.LogSource.LogWarning("No usable Unity/TMP Font is available yet; will retry after the game loads more assets.");
-            return;
-        }
-
-        if (_tmpFont != null)
-        {
-            TuneMaterial(_tmpFont.material);
-            return;
-        }
-
-        _tmpFont = TMP_FontAsset.CreateFontAsset(
-            _legacyFont,
-            CrispChineseFontPlugin.SamplingPointSize.Value,
-            CrispChineseFontPlugin.AtlasPadding.Value,
-            GlyphRenderMode.SDFAA,
-            CrispChineseFontPlugin.AtlasWidth.Value,
-            CrispChineseFontPlugin.AtlasHeight.Value,
-            AtlasPopulationMode.Dynamic);
-
-        if (_tmpFont == null)
-        {
-            CrispChineseFontPlugin.LogSource.LogError($"TMP failed to create a font asset from '{SafeFontName(_legacyFont)}'.");
-            return;
-        }
-
-        _tmpFont.name = "LC2_CrispChinese_DynamicSDF";
-        _tmpFont.isMultiAtlasTexturesEnabled = true;
-        TuneMaterial(_tmpFont.material);
-
-        CrispChineseFontPlugin.LogSource.LogInfo(
-            $"Created TMP font '{_tmpFont.name}' from '{SafeFontName(_legacyFont)}', " +
-            $"sampling={CrispChineseFontPlugin.SamplingPointSize.Value}, " +
-            $"padding={CrispChineseFontPlugin.AtlasPadding.Value}, " +
-            $"atlas={CrispChineseFontPlugin.AtlasWidth.Value}x{CrispChineseFontPlugin.AtlasHeight.Value}.");
+        return null;
     }
 
-    private static string[] GetConfiguredFontNames()
+    private static TMP_FontAsset TryCreateTmpFontAssetFromFont(Font sourceFont, string profileKey, string originalFontName, string sourceDescription)
     {
-        var fontNames = CrispChineseFontPlugin.FontCandidates.Value
-            .Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(static name => name.Trim())
-            .Where(static name => name.Length > 0)
-            .ToArray();
-
-        if (fontNames.Length == 0)
+        if (sourceFont == null)
         {
-            fontNames = new[] { "Microsoft YaHei UI", "Microsoft YaHei" };
+            return null;
         }
 
-        return fontNames;
+        try
+        {
+            var tmpFont = TMP_FontAsset.CreateFontAsset(
+                sourceFont,
+                CrispChineseFontPlugin.SamplingPointSize.Value,
+                CrispChineseFontPlugin.AtlasPadding.Value,
+                GlyphRenderMode.SDFAA,
+                CrispChineseFontPlugin.AtlasWidth.Value,
+                CrispChineseFontPlugin.AtlasHeight.Value,
+                AtlasPopulationMode.Dynamic);
+
+            return FinalizeReplacementFont(tmpFont, profileKey, originalFontName, sourceDescription);
+        }
+        catch (Exception ex)
+        {
+            CrispChineseFontPlugin.LogSource.LogWarning(
+                $"TMP font creation failed from {sourceDescription} for '{originalFontName}': {GetBaseMessage(ex)}");
+            return null;
+        }
     }
 
-    private static TMP_FontAsset TryCreateTmpFontAssetFromFile()
+    private static TMP_FontAsset TryCreateTmpFontAssetFromFile(string configuredPath, string profileKey, string originalFontName)
     {
-        var fontPath = ResolveGamePath(CrispChineseFontPlugin.FontFilePath.Value);
+        var fontPath = ResolveGamePath(configuredPath);
         if (string.IsNullOrWhiteSpace(fontPath) || !File.Exists(fontPath))
         {
             return null;
@@ -252,15 +361,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
                 return null;
             }
 
-            tmpFont.name = "LC2_CrispChinese_DynamicSDF_File";
-            tmpFont.isMultiAtlasTexturesEnabled = true;
-            TuneMaterial(tmpFont.material);
-            CrispChineseFontPlugin.LogSource.LogInfo(
-                $"Created TMP font '{tmpFont.name}' from file '{fontPath}', " +
-                $"sampling={CrispChineseFontPlugin.SamplingPointSize.Value}, " +
-                $"padding={CrispChineseFontPlugin.AtlasPadding.Value}, " +
-                $"atlas={CrispChineseFontPlugin.AtlasWidth.Value}x{CrispChineseFontPlugin.AtlasHeight.Value}.");
-            return tmpFont;
+            return FinalizeReplacementFont(tmpFont, profileKey, originalFontName, $"file '{fontPath}'");
         }
         catch (Exception ex)
         {
@@ -269,9 +370,27 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private static Font TryCreateFontFromFile()
+    private static TMP_FontAsset FinalizeReplacementFont(TMP_FontAsset tmpFont, string profileKey, string originalFontName, string sourceDescription)
     {
-        var fontPath = ResolveGamePath(CrispChineseFontPlugin.FontFilePath.Value);
+        if (tmpFont == null)
+        {
+            return null;
+        }
+
+        tmpFont.name = $"LC2_Crisp_{profileKey}";
+        tmpFont.isMultiAtlasTexturesEnabled = true;
+        TuneMaterial(tmpFont.material);
+        CrispChineseFontPlugin.LogSource.LogInfo(
+            $"Created TMP replacement '{tmpFont.name}' for original '{originalFontName}' from {sourceDescription}, " +
+            $"sampling={CrispChineseFontPlugin.SamplingPointSize.Value}, " +
+            $"padding={CrispChineseFontPlugin.AtlasPadding.Value}, " +
+            $"atlas={CrispChineseFontPlugin.AtlasWidth.Value}x{CrispChineseFontPlugin.AtlasHeight.Value}.");
+        return tmpFont;
+    }
+
+    private static Font TryCreateFontFromFile(string configuredPath)
+    {
+        var fontPath = ResolveGamePath(configuredPath);
         if (string.IsNullOrWhiteSpace(fontPath) || !File.Exists(fontPath))
         {
             return null;
@@ -322,167 +441,6 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         return ex.GetBaseException().Message;
     }
 
-    private static Font TryCreateDynamicFontFromOs(string[] fontNames)
-    {
-        var loggedMissingMethod = false;
-
-        foreach (var fontName in fontNames)
-        {
-            try
-            {
-                var font = Font.CreateDynamicFontFromOSFont(fontName, CrispChineseFontPlugin.SamplingPointSize.Value);
-                if (font != null)
-                {
-                    CrispChineseFontPlugin.LogSource.LogInfo($"Created dynamic OS Font from '{fontName}'.");
-                    return font;
-                }
-            }
-            catch (MissingMethodException ex)
-            {
-                if (!loggedMissingMethod)
-                {
-                    loggedMissingMethod = true;
-                    CrispChineseFontPlugin.LogSource.LogWarning(
-                        $"Unity OS font loader is unavailable in this IL2CPP runtime; falling back to loaded game fonts. {ex.Message}");
-                }
-
-                return null;
-            }
-            catch (Exception ex)
-            {
-                CrispChineseFontPlugin.LogSource.LogWarning($"Failed to create OS Font '{fontName}': {ex.Message}");
-            }
-        }
-
-        return null;
-    }
-
-    private static Font TryFindSourceFontFromLoadedTmpFontAsset(string[] preferredNames)
-    {
-        var tmpFont = TryFindLoadedTmpFontAsset(preferredNames);
-        if (tmpFont == null)
-        {
-            return null;
-        }
-
-        try
-        {
-            var sourceFont = tmpFont.sourceFontFile;
-            if (sourceFont != null)
-            {
-                CrispChineseFontPlugin.LogSource.LogInfo(
-                    $"Using source Font '{SafeFontName(sourceFont)}' from loaded TMP font '{SafeObjectName(tmpFont)}'.");
-            }
-
-            return sourceFont;
-        }
-        catch (Exception ex)
-        {
-            CrispChineseFontPlugin.LogSource.LogWarning(
-                $"Loaded TMP font '{SafeObjectName(tmpFont)}' has no usable source Font: {ex.Message}");
-            return null;
-        }
-    }
-
-    private static TMP_FontAsset TryFindLoadedTmpFontAsset(string[] preferredNames)
-    {
-        var fontAssets = Resources.FindObjectsOfTypeAll<TMP_FontAsset>();
-        if (fontAssets == null || fontAssets.Length == 0)
-        {
-            return null;
-        }
-
-        foreach (var preferredName in preferredNames.Concat(GetFallbackFontNameTokens()))
-        {
-            foreach (var fontAsset in fontAssets)
-            {
-                if (fontAsset == null)
-                {
-                    continue;
-                }
-
-                var loadedName = SafeObjectName(fontAsset);
-                if (loadedName.IndexOf(preferredName, StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    CrispChineseFontPlugin.LogSource.LogInfo($"Using loaded TMP font '{loadedName}'.");
-                    return fontAsset;
-                }
-            }
-        }
-
-        foreach (var fontAsset in fontAssets)
-        {
-            if (fontAsset == null)
-            {
-                continue;
-            }
-
-            var loadedName = SafeObjectName(fontAsset);
-            if (!string.IsNullOrEmpty(loadedName))
-            {
-                CrispChineseFontPlugin.LogSource.LogInfo($"Using first loaded TMP font '{loadedName}'.");
-                return fontAsset;
-            }
-        }
-
-        return null;
-    }
-
-    private static Font TryFindLoadedFont(string[] preferredNames)
-    {
-        var fonts = Resources.FindObjectsOfTypeAll<Font>();
-        if (fonts == null || fonts.Length == 0)
-        {
-            return null;
-        }
-
-        foreach (var preferredName in preferredNames.Concat(GetFallbackFontNameTokens()))
-        {
-            foreach (var font in fonts)
-            {
-                if (font == null)
-                {
-                    continue;
-                }
-
-                var loadedName = SafeFontName(font);
-                if (loadedName.IndexOf(preferredName, StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    CrispChineseFontPlugin.LogSource.LogInfo($"Using loaded Unity Font '{loadedName}'.");
-                    return font;
-                }
-            }
-        }
-
-        foreach (var font in fonts)
-        {
-            if (font == null)
-            {
-                continue;
-            }
-
-            var loadedName = SafeFontName(font);
-            if (!string.IsNullOrEmpty(loadedName))
-            {
-                CrispChineseFontPlugin.LogSource.LogInfo($"Using first loaded Unity Font '{loadedName}'.");
-                return font;
-            }
-        }
-
-        return null;
-    }
-
-    private static IEnumerable<string> GetFallbackFontNameTokens()
-    {
-        yield return "Alibaba";
-        yield return "PuHui";
-        yield return "Puhui";
-        yield return "Source Han";
-        yield return "Noto";
-        yield return "Microsoft YaHei";
-        yield return "SimHei";
-    }
-
     private static string SafeFontName(Font font)
     {
         try
@@ -507,17 +465,23 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private void TryPreloadLocalizationGlyphs()
+    private void TryPreloadLocalizationGlyphs(TMP_FontAsset fontAsset)
     {
-        if (_preloadedGlyphs || _tmpFont == null || !CrispChineseFontPlugin.PreloadLocalizationGlyphs.Value)
+        if (fontAsset == null || !CrispChineseFontPlugin.PreloadLocalizationGlyphs.Value)
+        {
+            return;
+        }
+
+        var fontId = fontAsset.GetInstanceID();
+        if (_preloadedFontIds.Contains(fontId))
         {
             return;
         }
 
         try
         {
-            PreloadLocalizationGlyphs();
-            _preloadedGlyphs = true;
+            PreloadLocalizationGlyphs(fontAsset);
+            _preloadedFontIds.Add(fontId);
         }
         catch (Exception ex)
         {
@@ -525,9 +489,9 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private void PreloadLocalizationGlyphs()
+    private static void PreloadLocalizationGlyphs(TMP_FontAsset fontAsset)
     {
-        if (_tmpFont == null || _tmpFont.atlasPopulationMode != AtlasPopulationMode.Dynamic)
+        if (fontAsset == null || fontAsset.atlasPopulationMode != AtlasPopulationMode.Dynamic)
         {
             return;
         }
@@ -544,7 +508,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         {
             foreach (var ch in File.ReadAllText(file, Encoding.UTF8))
             {
-                if (IsCjk(ch))
+                if (IsEastAsian(ch))
                 {
                     chars.Add(ch);
                     if (chars.Count >= CrispChineseFontPlugin.MaxPreloadChars.Value)
@@ -566,30 +530,31 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
 
         var preloadText = new string(chars.ToArray());
-        if (_tmpFont.TryAddCharacters(preloadText, out var missing) && string.IsNullOrEmpty(missing))
+        if (fontAsset.TryAddCharacters(preloadText, out var missing) && string.IsNullOrEmpty(missing))
         {
-            CrispChineseFontPlugin.LogSource.LogInfo($"Preloaded {chars.Count} CJK glyphs.");
+            CrispChineseFontPlugin.LogSource.LogInfo($"Preloaded {chars.Count} East Asian glyphs into '{SafeObjectName(fontAsset)}'.");
         }
         else
         {
             CrispChineseFontPlugin.LogSource.LogWarning(
-                $"Preloaded {chars.Count - missing.Length}/{chars.Count} CJK glyphs; missing={missing.Length}.");
+                $"Preloaded {chars.Count - missing.Length}/{chars.Count} East Asian glyphs into '{SafeObjectName(fontAsset)}'; missing={missing.Length}.");
         }
     }
 
     private void ApplyToLoadedText()
     {
+        TryCreateLegacyFont();
+
         var tmpCount = 0;
         var legacyCount = 0;
 
         foreach (var text in Resources.FindObjectsOfTypeAll<TMP_Text>())
         {
-            if (text == null || !ShouldPatch(text.text))
+            if (text == null || !TryPatchTmpText(text))
             {
                 continue;
             }
 
-            PatchTmpText(text);
             tmpCount++;
         }
 
@@ -597,7 +562,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         {
             foreach (var text in Resources.FindObjectsOfTypeAll<Text>())
             {
-                if (text == null || !ShouldPatch(text.text))
+                if (text == null || !ContainsEastAsian(text.text))
                 {
                     continue;
                 }
@@ -616,30 +581,208 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private void PatchTmpText(TMP_Text text)
+    private bool TryPatchTmpText(TMP_Text text)
     {
-        if (_tmpFont == null)
+        if (_isPatching)
+        {
+            return false;
+        }
+
+        try
+        {
+            _isPatching = true;
+            return PatchTmpText(text);
+        }
+        finally
+        {
+            _isPatching = false;
+        }
+    }
+
+    private bool PatchTmpText(TMP_Text text)
+    {
+        var currentFont = text.font;
+        if (currentFont == null)
+        {
+            return false;
+        }
+
+        if (IsOurReplacementFont(currentFont))
+        {
+            TryAddTextCharacters(currentFont, text.text);
+            TuneMaterial(text.fontSharedMaterial);
+            return false;
+        }
+
+        var profileKey = GetFontProfileKey(currentFont);
+        if (string.IsNullOrEmpty(profileKey))
+        {
+            return false;
+        }
+
+        var replacementFont = GetOrCreateReplacementFont(currentFont, profileKey);
+        if (replacementFont == null)
+        {
+            return false;
+        }
+
+        var originalMaterial = text.fontSharedMaterial;
+        TryAddTextCharacters(replacementFont, text.text);
+        text.font = replacementFont;
+        text.fontSharedMaterial = GetOrCreateReplacementMaterial(originalMaterial, replacementFont, profileKey);
+        TuneMaterial(text.fontSharedMaterial);
+        text.ForceMeshUpdate(true);
+        return true;
+    }
+
+    private static void TryAddTextCharacters(TMP_FontAsset fontAsset, string text)
+    {
+        if (fontAsset == null || string.IsNullOrEmpty(text) || fontAsset.atlasPopulationMode != AtlasPopulationMode.Dynamic)
         {
             return;
         }
 
-        if (!string.IsNullOrEmpty(text.text) && _tmpFont.atlasPopulationMode == AtlasPopulationMode.Dynamic)
+        try
         {
-            _tmpFont.TryAddCharacters(text.text, out _);
+            fontAsset.TryAddCharacters(text, out _);
+        }
+        catch (Exception ex)
+        {
+            CrispChineseFontPlugin.LogSource.LogWarning(
+                $"Failed to add glyphs to '{SafeObjectName(fontAsset)}': {GetBaseMessage(ex)}");
+        }
+    }
+
+    private Material GetOrCreateReplacementMaterial(Material originalMaterial, TMP_FontAsset replacementFont, string profileKey)
+    {
+        var originalId = originalMaterial == null ? 0 : originalMaterial.GetInstanceID();
+        var key = $"{profileKey}:{replacementFont.GetInstanceID()}:{originalId}";
+        if (_replacementMaterials.TryGetValue(key, out var material) && material != null)
+        {
+            return material;
         }
 
-        text.font = _tmpFont;
-        text.fontSharedMaterial = _tmpFont.material;
-        TuneMaterial(text.fontSharedMaterial);
-        text.ForceMeshUpdate(true);
+        var sourceMaterial = originalMaterial != null ? originalMaterial : replacementFont.material;
+        material = sourceMaterial != null ? new Material(sourceMaterial) : replacementFont.material;
+        if (material != null)
+        {
+            material.name = $"{SafeObjectName(sourceMaterial)} -> {SafeObjectName(replacementFont)}";
+            var atlasTexture = GetMainTexture(replacementFont.material);
+            if (atlasTexture != null && material.HasProperty("_MainTex"))
+            {
+                material.SetTexture("_MainTex", atlasTexture);
+            }
+
+            TuneMaterial(material);
+        }
+
+        _replacementMaterials[key] = material;
+        return material;
     }
 
-    private static bool ShouldPatch(string text)
+    private static Texture GetMainTexture(Material material)
     {
-        return CrispChineseFontPlugin.ReplaceAllTmpText.Value || ContainsCjk(text);
+        if (material == null || !material.HasProperty("_MainTex"))
+        {
+            return null;
+        }
+
+        try
+        {
+            return material.GetTexture("_MainTex");
+        }
+        catch
+        {
+            return null;
+        }
     }
 
-    private static bool ContainsCjk(string text)
+    private bool IsOurReplacementFont(TMP_FontAsset fontAsset)
+    {
+        if (fontAsset == null)
+        {
+            return false;
+        }
+
+        if (_replacementFontIds.Contains(fontAsset.GetInstanceID()))
+        {
+            return true;
+        }
+
+        return SafeObjectName(fontAsset).StartsWith("LC2_Crisp_", StringComparison.Ordinal);
+    }
+
+    private static string GetFontPathForProfile(string profileKey)
+    {
+        return profileKey switch
+        {
+            "AlibabaPuHuiTi" => CrispChineseFontPlugin.FontFilePath.Value,
+            "SourceHanSansCN" => CrispChineseFontPlugin.SourceHanAsciiFontFilePath.Value,
+            "BossTitle" => CrispChineseFontPlugin.BossTitleFontFilePath.Value,
+            "TraditionalChinese" => CrispChineseFontPlugin.TraditionalChineseFontFilePath.Value,
+            "Japanese" => CrispChineseFontPlugin.JapaneseFontFilePath.Value,
+            "Korean" => CrispChineseFontPlugin.KoreanFontFilePath.Value,
+            _ => string.Empty,
+        };
+    }
+
+    private static string[] GetSourceFontNameTokens(string profileKey)
+    {
+        return profileKey switch
+        {
+            "AlibabaPuHuiTi" => new[] { "AlibabaPuHuiTi", "Alibaba PuHuiTi", "Alibaba-PuHuiTi" },
+            "SourceHanSansCN" => new[] { "SourceHanSansCN", "Source Han Sans CN", "Alibaba-PuHuiTi-Bold", "Alibaba PuHuiTi" },
+            "BossTitle" => new[] { "AlibabaPuHuiTi", "Alibaba PuHuiTi", "Alibaba-PuHuiTi" },
+            "TraditionalChinese" => new[] { "AlibabaSansTC", "Alibaba Sans TC", "Alibaba Sans TCN", "TCN" },
+            "Japanese" => new[] { "AlibabaSansJP", "Alibaba Sans JP", "Japanese", "JP" },
+            "Korean" => new[] { "AlibabaSansKR", "Alibaba Sans KR", "Korean", "KR" },
+            _ => Array.Empty<string>(),
+        };
+    }
+
+    private static string GetFontProfileKey(TMP_FontAsset fontAsset)
+    {
+        var name = SafeObjectName(fontAsset);
+        if (string.IsNullOrEmpty(name) ||
+            name.StartsWith("LC2_Crisp_", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        if (ContainsAny(name, "SourceHanSansCN-Bold-Hunter SDF"))
+        {
+            return "SourceHanSansCN";
+        }
+
+        if (!ContainsAny(name, "Alibaba-PuHuiTi-Bold SDF"))
+        {
+            return string.Empty;
+        }
+
+        if (ContainsAny(name, "BossTitle"))
+        {
+            return "BossTitle";
+        }
+
+        if (ContainsAny(name, " - TCN"))
+        {
+            return "TraditionalChinese";
+        }
+
+        if (ContainsAny(name, " - JP"))
+        {
+            return "Japanese";
+        }
+
+        if (ContainsAny(name, " - KR"))
+        {
+            return "Korean";
+        }
+
+        return "AlibabaPuHuiTi";
+    }
+
+    private static bool ContainsEastAsian(string text)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -648,7 +791,39 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
 
         foreach (var ch in text)
         {
-            if (IsCjk(ch))
+            if (IsEastAsian(ch))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsEastAsian(char ch)
+    {
+        return IsCjk(ch)
+            || ch is >= '\u3040' and <= '\u309F'
+            || ch is >= '\u30A0' and <= '\u30FF'
+            || ch is >= '\u31F0' and <= '\u31FF'
+            || ch is >= '\u1100' and <= '\u11FF'
+            || ch is >= '\u3130' and <= '\u318F'
+            || ch is >= '\uAC00' and <= '\uD7AF';
+    }
+
+    private void LogMissingProfileOnce(string profileKey, string message)
+    {
+        if (_loggedMissingProfiles.Add(profileKey))
+        {
+            CrispChineseFontPlugin.LogSource.LogWarning(message);
+        }
+    }
+
+    private static bool ContainsAny(string text, params string[] needles)
+    {
+        foreach (var needle in needles)
+        {
+            if (text.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return true;
             }
@@ -695,5 +870,53 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         {
             material.SetFloat("_MaskSoftnessY", 0f);
         }
+    }
+}
+
+internal static class TextMeshProHooks
+{
+    private static readonly string[] HookMethodNames =
+    {
+        "OnEnable",
+        "set_text",
+        "SetVerticesDirty",
+    };
+
+    internal static int Install(Harmony harmony)
+    {
+        var postfix = AccessTools.Method(typeof(TextMeshProHooks), nameof(Postfix));
+        var seen = new HashSet<MethodBase>();
+        var patchedCount = 0;
+
+        foreach (var type in new[] { typeof(TMP_Text), typeof(TextMeshProUGUI), typeof(TextMeshPro) })
+        {
+            foreach (var methodName in HookMethodNames)
+            {
+                foreach (var original in GetDeclaredMethods(type, methodName))
+                {
+                    if (!seen.Add(original))
+                    {
+                        continue;
+                    }
+
+                    harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+                    patchedCount++;
+                }
+            }
+        }
+
+        return patchedCount;
+    }
+
+    private static IEnumerable<MethodInfo> GetDeclaredMethods(Type type, string methodName)
+    {
+        return type
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(method => method.Name == methodName);
+    }
+
+    private static void Postfix(TMP_Text __instance)
+    {
+        CrispChineseFontRuntime.QueueFromHook(__instance);
     }
 }

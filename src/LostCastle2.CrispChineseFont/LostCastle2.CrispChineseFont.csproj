@@ -17,6 +17,7 @@
   <ItemGroup>
     <Reference Include="BepInEx.Core" HintPath="$(BepInExCoreDir)\BepInEx.Core.dll" Private="false" />
     <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExCoreDir)\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExCoreDir)\0Harmony.dll" Private="false" />
     <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExCoreDir)\Il2CppInterop.Runtime.dll" Private="false" />
     <Reference Include="Il2Cppmscorlib" HintPath="$(InteropDir)\Il2Cppmscorlib.dll" Private="false" />
     <Reference Include="Il2CppSystem" HintPath="$(InteropDir)\Il2CppSystem.dll" Private="false" />

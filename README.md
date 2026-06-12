@@ -1,12 +1,31 @@
 # LostCastle2CrispFont
 
-BepInEx 6 IL2CPP mod for Lost Castle 2. It improves blurry Simplified Chinese UI text by replacing loaded TextMeshPro text with a high-sampling dynamic SDF font at runtime.
+BepInEx 6 IL2CPP mod for Lost Castle 2. It improves blurry TextMeshPro UI text by replacing the game's low-sampling East Asian font assets with high-sampling dynamic SDF replacements at runtime.
 
 ## What It Fixes
 
-Lost Castle 2 ships its main Simplified Chinese TMP asset as `Alibaba-PuHuiTi-Bold SDF` with a low source sampling size. Many CJK glyphs are effectively around 20 pixels in the atlas, so small UI text becomes soft after SDF sampling, bilinear filtering, outlines, and UI scaling.
+Lost Castle 2 ships several East Asian TMP assets with low source sampling sizes. Many glyphs are effectively around 20 pixels in the atlas, so small UI text becomes soft after SDF sampling, bilinear filtering, outlines, and UI scaling.
 
-This mod creates a dynamic TMP SDF font at `SamplingPointSize = 56`, preloads CJK glyphs from localization files, and patches loaded `TMP_Text` objects that contain CJK characters.
+This mod creates high-sampling dynamic TMP SDF replacements at `SamplingPointSize = 56`, preloads East Asian glyphs from localization files, and patches loaded `TMP_Text` objects whose original font asset matches one of the known game font profiles.
+
+Currently matched profiles:
+
+- `Alibaba-PuHuiTi-Bold SDF`
+- `Alibaba-PuHuiTi-Bold SDF - Chat`
+- `Alibaba-PuHuiTi-Bold SDF - BossTitle`
+- `Alibaba-PuHuiTi-Bold SDF - TCN`
+- `Alibaba-PuHuiTi-Bold SDF - JP`
+- `Alibaba-PuHuiTi-Bold SDF - KR`
+- `SourceHanSansCN-Bold-Hunter SDF`
+- `SourceHanSansCN-Bold-Hunter SDF-ASCII`
+
+English text is also sharpened when it is rendered through one of the matched font assets.
+
+For each profile, the mod tries sources in this order:
+
+- The original TMP font asset's embedded `sourceFontFile`
+- A matching Unity `Font` already loaded by the game
+- A configured TTF file under the plugin's `fonts` directory
 
 ## Install
 
@@ -18,7 +37,7 @@ This mod creates a dynamic TMP SDF font at `SamplingPointSize = 56`, preloads CJ
    <Lost Castle 2>/BepInEx/plugins/LostCastle2.CrispChineseFont/
    ```
 
-4. Copy `AlibabaPuHuiTi-3-85-Bold.ttf` to:
+4. Copy the bundled font files to:
 
    ```text
    <Lost Castle 2>/BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/
@@ -40,7 +59,7 @@ The project expects BepInEx and generated IL2CPP interop assemblies in the game 
 .\scripts\deploy.ps1 -GameDir "D:\Program Files (x86)\Steam\steamapps\common\Lost Castle 2"
 ```
 
-`deploy.ps1` builds the plugin, copies the DLL, and copies `assets/fonts/AlibabaPuHuiTi-3-85-Bold.ttf` into the plugin's `fonts` directory.
+`deploy.ps1` builds the plugin, copies the DLL, and copies every file from `assets/fonts/` into the plugin's `fonts` directory.
 
 ## Configuration
 
@@ -53,17 +72,23 @@ BepInEx/config/local.lostcastle2.crispchinesefont.cfg
 Useful settings:
 
 - `FontFilePath`: font file used by the high-sampling TMP path.
+- `SourceHanAsciiFontFilePath`: font file used by the `SourceHanSansCN-Bold-Hunter` Simplified Chinese profile.
+- `BossTitleFontFilePath`: font file used by the BossTitle profile.
+- `TraditionalChineseFontFilePath`: optional font file used by the Traditional Chinese profile.
+- `JapaneseFontFilePath`: optional font file used by the Japanese profile.
+- `KoreanFontFilePath`: font file used by the Korean profile.
 - `SamplingPointSize`: default `56`.
 - `AtlasPadding`: default `9`.
 - `AtlasWidth` / `AtlasHeight`: default `4096`.
 - `Sharpness`: default `0.08`.
-- `ReplaceAllTmpText`: default `false`; set to `true` only if some CJK text is missed.
-- `TryOsFonts`: default `false`; Unity 6000 IL2CPP commonly strips OS font methods.
+- `PreferEmbeddedSourceFont`: default `true`; use the original TMP source font before configured TTF files.
+- `EnableImmediateHooks`: default `true`; patch `TMP_Text` from Harmony hooks instead of waiting only for periodic scanning.
+- `ScanIntervalSeconds`: fallback scan interval, default `1.5`.
 
 Expected log line for the preferred path:
 
 ```text
-Created TMP font 'LC2_CrispChinese_DynamicSDF_File' from file ...
+Created TMP replacement 'LC2_Crisp_AlibabaPuHuiTi' ...
 ```
 
 If that line is missing, check `BepInEx/LogOutput.log`.
@@ -71,5 +96,6 @@ If that line is missing, check `BepInEx/LogOutput.log`.
 ## Notes
 
 - The mod does not rewrite game bundles.
-- The bundled font file is extracted from the game's own font asset bundle for runtime use.
-- If the font file is missing, the plugin falls back to loaded game TMP assets, which is safer but less sharp.
+- The bundled font files are extracted from the game's own font asset bundles for runtime fallback use.
+- The original TMP material is cloned for each patched text material, then pointed at the replacement atlas, so colors, outlines, underlay, and masking behavior are preserved where possible.
+- If a configured font file is missing, the plugin still tries the original embedded source font and loaded game fonts first. It does not call Unity's OS font APIs.
