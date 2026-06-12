@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>LostCastle2.CrispChineseFont</AssemblyName>
+    <RootNamespace>LostCastle2.CrispChineseFont</RootNamespace>
+    <GameDir Condition="'$(GameDir)' == ''">D:\Program Files (x86)\Steam\steamapps\common\Lost Castle 2</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+    <BepInExCoreDir>$(BepInExDir)\core</BepInExCoreDir>
+    <InteropDir>$(BepInExDir)\interop</InteropDir>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExCoreDir)\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExCoreDir)\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExCoreDir)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(InteropDir)\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(InteropDir)\Il2CppSystem.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(InteropDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(InteropDir)\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextCoreFontEngineModule" HintPath="$(InteropDir)\UnityEngine.TextCoreFontEngineModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(InteropDir)\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(InteropDir)\Unity.TextMeshPro.dll" Private="false" />
+  </ItemGroup>
+</Project>
