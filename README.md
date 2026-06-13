@@ -21,11 +21,26 @@ Currently matched profiles:
 
 English text is also sharpened when it is rendered through one of the matched font assets.
 
-For each profile, the mod tries sources in this order:
+## Font Replacer
 
-- The original TMP font asset's embedded `sourceFontFile`
-- A matching Unity `Font` already loaded by the game
-- A configured TTF file under the plugin's `fonts` directory
+Each profile can either be **replaced** with a font you supply, or left on the game's own font (crisp re-render only).
+
+- When a profile's replacement is **on**, the mod builds the high-sampling SDF asset from that profile's `FontFilePath`.
+- When it is **off** (or the master switch is off, or the file is missing), the mod falls back to the original game font, trying in order:
+  - The original TMP font asset's embedded `sourceFontFile`
+  - A matching Unity `Font` already loaded by the game
+  - The profile's configured `FontFilePath` (last resort)
+
+Default mapping shipped with the mod (West-fantasy cartoon set):
+
+| Profile | Default font | Enabled by default |
+|---|---|---|
+| `AlibabaPuHuiTi` (main UI / body) | 华康圆体W7 | yes |
+| `Chat` (dialogue) | 站酷快乐体 | yes |
+| `BossTitle` (big titles) | 汉仪雅酷黑 75W | yes |
+| `SourceHanSansCN` (ASCII / numbers) | 优设标题黑 | no |
+| `TraditionalChinese` / `Japanese` | — | no |
+| `Korean` | Alibaba Sans KR | no |
 
 ## Install
 
@@ -69,21 +84,22 @@ After the first launch, BepInEx creates:
 BepInEx/config/local.lostcastle2.crispchinesefont.cfg
 ```
 
-Useful settings:
+Global settings:
 
-- `FontFilePath`: font file used by the high-sampling TMP path.
-- `SourceHanAsciiFontFilePath`: font file used by the `SourceHanSansCN-Bold-Hunter` Simplified Chinese profile.
-- `BossTitleFontFilePath`: font file used by the BossTitle profile.
-- `TraditionalChineseFontFilePath`: optional font file used by the Traditional Chinese profile.
-- `JapaneseFontFilePath`: optional font file used by the Japanese profile.
-- `KoreanFontFilePath`: font file used by the Korean profile.
-- `SamplingPointSize`: default `56`.
-- `AtlasPadding`: default `9`.
-- `AtlasWidth` / `AtlasHeight`: default `4096`.
-- `Sharpness`: default `0.08`.
-- `PreferEmbeddedSourceFont`: default `true`; use the original TMP source font before configured TTF files.
-- `EnableImmediateHooks`: default `true`; patch `TMP_Text` from Harmony hooks instead of waiting only for periodic scanning.
-- `ScanIntervalSeconds`: fallback scan interval, default `1.5`.
+- `[General] EnableFontReplacer`: master switch, default `true`. When `false`, every profile keeps the game font (crisp re-render only).
+- `[Font] SamplingPointSize`: default `56`. Global SDF sampling; profiles can override.
+- `[Font] AtlasPadding`: default `9`.
+- `[Font] AtlasWidth` / `AtlasHeight`: default `4096`.
+- `[Material] Sharpness`: default `0.08`. Global; profiles can override.
+- `[Apply] PreferEmbeddedSourceFont`: default `true`; for non-replacing profiles, use the original embedded source font before any fallback file.
+- `[Apply] ReplaceLegacyUiText`, `PreloadLocalizationGlyphs`, `ScanIntervalSeconds`, `MaxPreloadChars`, `EnableImmediateHooks`.
+
+Per-profile settings (one section each, e.g. `[Profile.AlibabaPuHuiTi]`, `[Profile.Chat]`, `[Profile.BossTitle]`, `[Profile.SourceHanSansCN]`, `[Profile.TraditionalChinese]`, `[Profile.Japanese]`, `[Profile.Korean]`):
+
+- `Enabled`: replace this category's font with `FontFilePath`. When `false`, the game font is reused.
+- `FontFilePath`: replacement `.ttf`/`.otf`. Relative paths resolve from the game directory.
+- `Sharpness`: per-profile material sharpness. Negative (default `-1`) means use the global value.
+- `SamplingPointSize`: per-profile SDF sampling. Zero (default) means use the global value.
 
 Expected log line for the preferred path:
 
