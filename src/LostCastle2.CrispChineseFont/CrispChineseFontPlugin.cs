@@ -647,7 +647,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         var profileKey = profile?.Key ?? "Unknown";
         tmpFont.name = $"LC2_Crisp_{profileKey}";
         tmpFont.isMultiAtlasTexturesEnabled = true;
-        TuneMaterial(tmpFont.material, ResolveSharpness(profile));
+        TuneMaterial(tmpFont.material, ResolveSharpness(profile), tmpFont);
         CrispChineseFontPlugin.LogSource.LogInfo(
             $"Created TMP replacement '{tmpFont.name}' for original '{originalFontName}' from {sourceDescription}, " +
             $"sampling={ResolveSampling(profile)}, " +
@@ -904,7 +904,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         if (IsOurReplacementFont(currentFont))
         {
             TryAddTextCharacters(currentFont, text.text);
-            TuneMaterial(text.fontSharedMaterial, ResolveSharpnessForFont(currentFont));
+            TuneMaterial(text.fontSharedMaterial, ResolveSharpnessForFont(currentFont), currentFont);
             return false;
         }
 
@@ -932,7 +932,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         TryAddTextCharacters(replacementFont, text.text);
         text.font = replacementFont;
         text.fontSharedMaterial = GetOrCreateReplacementMaterial(originalMaterial, replacementFont, profileKey, sharpness);
-        TuneMaterial(text.fontSharedMaterial, sharpness);
+        TuneMaterial(text.fontSharedMaterial, sharpness, replacementFont);
         text.ForceMeshUpdate(true);
         return true;
     }
@@ -1054,7 +1054,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
                 material.SetTexture("_MainTex", atlasTexture);
             }
 
-            TuneMaterial(material, sharpness);
+            TuneMaterial(material, sharpness, replacementFont);
         }
 
         _replacementMaterials[key] = material;
@@ -1199,12 +1199,52 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
             || (c >= 0xF900 && c <= 0xFAFF);  // CJK Compatibility Ideographs
     }
 
-    private static void TuneMaterial(Material material, float sharpness)
+    // SDF geometry parameters that must match the atlas the glyphs were rendered into.
+    // When a material is cloned from the game's original font (built with a different padding,
+    // sampling size, and atlas dimensions), these values stay wrong and the shader decodes the
+    // distance field over the wrong spread, smearing the antialiased edges -> blurry text.
+    private static readonly string[] SdfGeometryProperties =
+    {
+        "_GradientScale",
+        "_TextureWidth",
+        "_TextureHeight",
+        "_ScaleRatioA",
+        "_ScaleRatioB",
+        "_ScaleRatioC",
+    };
+
+    // Copy the SDF geometry parameters from the replacement font's own (correctly generated)
+    // material onto a material that was cloned from the original game font.
+    private static void CopySdfGeometry(Material material, TMP_FontAsset replacementFont)
+    {
+        if (material == null || replacementFont == null)
+        {
+            return;
+        }
+
+        var reference = replacementFont.material;
+        if (reference == null || ReferenceEquals(reference, material))
+        {
+            return;
+        }
+
+        foreach (var property in SdfGeometryProperties)
+        {
+            if (material.HasProperty(property) && reference.HasProperty(property))
+            {
+                material.SetFloat(property, reference.GetFloat(property));
+            }
+        }
+    }
+
+    private static void TuneMaterial(Material material, float sharpness, TMP_FontAsset replacementFont = null)
     {
         if (material == null)
         {
             return;
         }
+
+        CopySdfGeometry(material, replacementFont);
 
         if (material.HasProperty("_Sharpness"))
         {
