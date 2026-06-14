@@ -9,3 +9,5 @@ artifacts/
 *.log
 BepInEx/
 .serena/
+.ccg/
+.claude/

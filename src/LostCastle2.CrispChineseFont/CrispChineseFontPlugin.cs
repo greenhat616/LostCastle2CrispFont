@@ -22,7 +22,7 @@ public sealed class CrispChineseFontPlugin : BasePlugin
 {
     public const string PluginGuid = "local.lostcastle2.crispchinesefont";
     public const string PluginName = "Lost Castle 2 Crisp Chinese Font";
-    public const string PluginVersion = "0.4.2";
+    public const string PluginVersion = "0.5.0";
 
     private const string FontDirPrefix = "BepInEx/plugins/LostCastle2.CrispChineseFont/fonts/";
 
@@ -188,6 +188,8 @@ public sealed class FontProfile
     public ConfigEntry<int> SamplingPointSize { get; private set; }
     public ConfigEntry<float> LineHeightScale { get; private set; }
     public ConfigEntry<string> NameMatchKeywords { get; private set; }
+    private string _cachedKeywordSource;
+    private string[] _cachedNameKeywords = Array.Empty<string>();
 
     public FontProfile(string key, string description, string[] sourceTokens)
     {
@@ -255,26 +257,73 @@ public sealed class FontProfile
             ? SamplingPointSize.Value
             : CrispChineseFontPlugin.SamplingPointSize.Value;
     }
+
+    public string[] GetNameMatchKeywords()
+    {
+        var source = NameMatchKeywords?.Value ?? string.Empty;
+        if (string.Equals(source, _cachedKeywordSource, StringComparison.Ordinal))
+        {
+            return _cachedNameKeywords;
+        }
+
+        _cachedKeywordSource = source;
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            _cachedNameKeywords = Array.Empty<string>();
+            return _cachedNameKeywords;
+        }
+
+        var parts = source.Split(',');
+        var keywords = new List<string>(parts.Length);
+        foreach (var part in parts)
+        {
+            var keyword = part.Trim();
+            if (keyword.Length > 0)
+            {
+                keywords.Add(keyword);
+            }
+        }
+
+        _cachedNameKeywords = keywords.Count == 0 ? Array.Empty<string>() : keywords.ToArray();
+        return _cachedNameKeywords;
+    }
 }
 
 public sealed class CrispChineseFontRuntime : MonoBehaviour
 {
+    private const float MinScanIntervalSeconds = 0.25f;
+    private const float MaxSteadyStateScanIntervalSeconds = 30f;
+    private const int StableScanPassesBeforeBackoff = 3;
+
     private static CrispChineseFontRuntime _instance;
 
     private readonly Dictionary<string, TMP_FontAsset> _replacementFonts = new();
-    private readonly Dictionary<string, Material> _replacementMaterials = new();
-    private readonly Dictionary<int, TMP_Text> _pendingHookTexts = new();
+    private readonly Dictionary<(string ProfileKey, int ReplacementFontId, int OriginalMaterialId), Material> _replacementMaterials = new();
+    private readonly Dictionary<int, PendingTmpText> _pendingHookTexts = new();
+    private readonly List<PendingTmpText> _pendingHookSnapshot = new(128);
+    private readonly HashSet<int> _processedTmpTextIds = new();
+    private readonly HashSet<int> _processedLegacyTextIds = new();
     private readonly HashSet<int> _replacementFontIds = new();
     private readonly Dictionary<int, string> _fontProfileByFontId = new();
+    private readonly Dictionary<int, HashSet<char>> _addedCharactersByFontId = new();
     private readonly HashSet<int> _preloadedFontIds = new();
     private readonly HashSet<string> _loggedMissingProfiles = new();
     private readonly HashSet<string> _loggedHierarchies = new();
+    private readonly StringBuilder _glyphBuffer = new(256);
     private Font _legacyFont;
     private float _nextScanTime;
+    private float _currentScanIntervalSeconds;
+    private int _stableScanPasses;
     private int _lastTmpCount;
     private int _lastLegacyCount;
     private bool _triedLegacyFont;
     private bool _isPatching;
+
+    private struct PendingTmpText
+    {
+        public TMP_Text Text;
+        public bool TextMayHaveChanged;
+    }
 
     public CrispChineseFontRuntime(IntPtr ptr)
         : base(ptr)
@@ -296,7 +345,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    internal static void QueueFromHook(TMP_Text text)
+    internal static void QueueFromHook(TMP_Text text, bool textMayHaveChanged)
     {
         var instance = _instance;
         if (instance == null || text == null)
@@ -304,20 +353,59 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
             return;
         }
 
-        instance.QueueTmpText(text);
+        instance.QueueTmpText(text, textMayHaveChanged);
     }
 
     private void Update()
     {
-        ApplyQueuedText();
+        if (ApplyQueuedText() > 0)
+        {
+            ResetScanBackoff();
+        }
 
         if (Time.unscaledTime < _nextScanTime)
         {
             return;
         }
 
-        _nextScanTime = Time.unscaledTime + Math.Max(0.25f, CrispChineseFontPlugin.ScanIntervalSeconds.Value);
-        ApplyToLoadedText();
+        ScheduleNextScan(ApplyToLoadedText());
+    }
+
+    private static float GetBaseScanInterval()
+    {
+        return Math.Max(MinScanIntervalSeconds, CrispChineseFontPlugin.ScanIntervalSeconds.Value);
+    }
+
+    private void ResetScanBackoff()
+    {
+        _stableScanPasses = 0;
+        _currentScanIntervalSeconds = GetBaseScanInterval();
+    }
+
+    private void ScheduleNextScan(int patchedCount)
+    {
+        var baseInterval = GetBaseScanInterval();
+        if (patchedCount > 0 || !CrispChineseFontPlugin.EnableImmediateHooks.Value)
+        {
+            _stableScanPasses = 0;
+            _currentScanIntervalSeconds = baseInterval;
+        }
+        else
+        {
+            _stableScanPasses++;
+            if (_currentScanIntervalSeconds <= 0f)
+            {
+                _currentScanIntervalSeconds = baseInterval;
+            }
+            else if (_stableScanPasses >= StableScanPassesBeforeBackoff)
+            {
+                _currentScanIntervalSeconds = Math.Min(
+                    MaxSteadyStateScanIntervalSeconds,
+                    Math.Max(baseInterval, _currentScanIntervalSeconds * 2f));
+            }
+        }
+
+        _nextScanTime = Time.unscaledTime + _currentScanIntervalSeconds;
     }
 
     private void TryCreateLegacyFont()
@@ -339,33 +427,64 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private void QueueTmpText(TMP_Text text)
+    private void QueueTmpText(TMP_Text text, bool textMayHaveChanged)
     {
         if (text == null || _isPatching)
         {
             return;
         }
 
-        _pendingHookTexts[text.GetInstanceID()] = text;
-    }
-
-    private void ApplyQueuedText()
-    {
-        if (_pendingHookTexts.Count == 0)
+        var textId = text.GetInstanceID();
+        if (!textMayHaveChanged && _processedTmpTextIds.Contains(textId))
         {
             return;
         }
 
-        var pending = _pendingHookTexts.Values.ToArray();
-        _pendingHookTexts.Clear();
-
-        foreach (var text in pending)
+        if (_pendingHookTexts.TryGetValue(textId, out var pending))
         {
+            pending.Text = text;
+            pending.TextMayHaveChanged |= textMayHaveChanged;
+            _pendingHookTexts[textId] = pending;
+            return;
+        }
+
+        _pendingHookTexts[textId] = new PendingTmpText
+        {
+            Text = text,
+            TextMayHaveChanged = textMayHaveChanged,
+        };
+    }
+
+    private int ApplyQueuedText()
+    {
+        if (_pendingHookTexts.Count == 0)
+        {
+            return 0;
+        }
+
+        _pendingHookSnapshot.Clear();
+        foreach (var pending in _pendingHookTexts.Values)
+        {
+            _pendingHookSnapshot.Add(pending);
+        }
+
+        _pendingHookTexts.Clear();
+        var patchedCount = 0;
+
+        foreach (var pending in _pendingHookSnapshot)
+        {
+            var text = pending.Text;
             if (text != null)
             {
-                TryPatchTmpText(text);
+                if (TryPatchTmpText(text, pending.TextMayHaveChanged))
+                {
+                    patchedCount++;
+                }
             }
         }
+
+        _pendingHookSnapshot.Clear();
+        return patchedCount;
     }
 
     private TMP_FontAsset GetOrCreateReplacementFont(TMP_FontAsset originalFont, string profileKey)
@@ -417,9 +536,10 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
 
         NormalizeLineMetrics(replacementFont, originalFont, profile);
         TryAddGameFontFallback(replacementFont, originalFont);
+        var replacementFontId = replacementFont.GetInstanceID();
         _replacementFonts[profileKey] = replacementFont;
-        _replacementFontIds.Add(replacementFont.GetInstanceID());
-        _fontProfileByFontId[replacementFont.GetInstanceID()] = profileKey;
+        _replacementFontIds.Add(replacementFontId);
+        _fontProfileByFontId[replacementFontId] = profileKey;
         TryPreloadLocalizationGlyphs(replacementFont);
         return replacementFont;
     }
@@ -481,7 +601,9 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
             return;
         }
 
-        if (replacementFont.GetInstanceID() == originalFont.GetInstanceID())
+        var replacementFontId = replacementFont.GetInstanceID();
+        var originalFontId = originalFont.GetInstanceID();
+        if (replacementFontId == originalFontId)
         {
             return;
         }
@@ -498,7 +620,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
             for (var i = 0; i < table.Count; i++)
             {
                 var existing = table[i];
-                if (existing != null && existing.GetInstanceID() == originalFont.GetInstanceID())
+                if (existing != null && existing.GetInstanceID() == originalFontId)
                 {
                     return;
                 }
@@ -667,9 +789,9 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         return profile?.ResolveSharpness() ?? CrispChineseFontPlugin.Sharpness.Value;
     }
 
-    private float ResolveSharpnessForFont(TMP_FontAsset fontAsset)
+    private float ResolveSharpnessForFont(int fontId)
     {
-        if (fontAsset != null && _fontProfileByFontId.TryGetValue(fontAsset.GetInstanceID(), out var profileKey))
+        if (fontId != 0 && _fontProfileByFontId.TryGetValue(fontId, out var profileKey))
         {
             var profile = CrispChineseFontPlugin.GetProfile(profileKey);
             if (profile != null)
@@ -835,7 +957,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private void ApplyToLoadedText()
+    private int ApplyToLoadedText()
     {
         TryCreateLegacyFont();
 
@@ -856,13 +978,20 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         {
             foreach (var text in Resources.FindObjectsOfTypeAll<Text>())
             {
-                if (text == null || !ContainsEastAsian(text.text))
+                if (text == null)
+                {
+                    continue;
+                }
+
+                var textId = text.GetInstanceID();
+                if (_processedLegacyTextIds.Contains(textId) || !ContainsEastAsian(text.text))
                 {
                     continue;
                 }
 
                 text.font = _legacyFont;
                 text.SetAllDirty();
+                _processedLegacyTextIds.Add(textId);
                 legacyCount++;
             }
         }
@@ -873,9 +1002,11 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
             _lastLegacyCount = legacyCount;
             CrispChineseFontPlugin.LogSource.LogInfo($"Patched TMP_Text={tmpCount}, legacy Text={legacyCount}.");
         }
+
+        return tmpCount + legacyCount;
     }
 
-    private bool TryPatchTmpText(TMP_Text text)
+    private bool TryPatchTmpText(TMP_Text text, bool textMayHaveChanged = false)
     {
         if (_isPatching)
         {
@@ -885,7 +1016,7 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         try
         {
             _isPatching = true;
-            return PatchTmpText(text);
+            return PatchTmpText(text, textMayHaveChanged);
         }
         finally
         {
@@ -893,18 +1024,35 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private bool PatchTmpText(TMP_Text text)
+    private bool PatchTmpText(TMP_Text text, bool textMayHaveChanged)
     {
+        var textId = text.GetInstanceID();
+        var alreadyProcessed = _processedTmpTextIds.Contains(textId);
+        if (!textMayHaveChanged && alreadyProcessed)
+        {
+            return false;
+        }
+
         var currentFont = text.font;
         if (currentFont == null)
         {
             return false;
         }
 
-        if (IsOurReplacementFont(currentFont))
+        var currentFontId = currentFont.GetInstanceID();
+        if (IsOurReplacementFont(currentFont, currentFontId))
         {
-            TryAddTextCharacters(currentFont, text.text);
-            TuneMaterial(text.fontSharedMaterial, ResolveSharpnessForFont(currentFont), currentFont);
+            if (textMayHaveChanged || !alreadyProcessed)
+            {
+                TryAddTextCharacters(currentFont, text.text);
+            }
+
+            if (!alreadyProcessed)
+            {
+                TuneMaterial(text.fontSharedMaterial, ResolveSharpnessForFont(currentFontId), currentFont);
+                _processedTmpTextIds.Add(textId);
+            }
+
             return false;
         }
 
@@ -934,16 +1082,13 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         text.fontSharedMaterial = GetOrCreateReplacementMaterial(originalMaterial, replacementFont, profileKey, sharpness);
         TuneMaterial(text.fontSharedMaterial, sharpness, replacementFont);
         text.ForceMeshUpdate(true);
+        _processedTmpTextIds.Add(textId);
         return true;
     }
 
     private static string ResolveProfileWithOverrides(TMP_Text text, string baseProfileKey)
     {
-        var hierarchy = GetHierarchyName(text, 5);
-        if (string.IsNullOrEmpty(hierarchy))
-        {
-            return baseProfileKey;
-        }
+        string hierarchy = null;
 
         foreach (var profile in CrispChineseFontPlugin.Profiles)
         {
@@ -952,16 +1097,21 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
                 continue;
             }
 
-            var keywords = profile.NameMatchKeywords.Value;
-            if (string.IsNullOrWhiteSpace(keywords))
+            var keywords = profile.GetNameMatchKeywords();
+            if (keywords.Length == 0)
             {
                 continue;
             }
 
-            foreach (var keyword in keywords.Split(','))
+            hierarchy ??= GetHierarchyName(text, 5);
+            if (string.IsNullOrEmpty(hierarchy))
             {
-                var trimmed = keyword.Trim();
-                if (trimmed.Length > 0 && hierarchy.IndexOf(trimmed, StringComparison.OrdinalIgnoreCase) >= 0)
+                return baseProfileKey;
+            }
+
+            foreach (var keyword in keywords)
+            {
+                if (hierarchy.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return profile.Key;
                 }
@@ -1016,28 +1166,61 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private static void TryAddTextCharacters(TMP_FontAsset fontAsset, string text)
+    private void TryAddTextCharacters(TMP_FontAsset fontAsset, string text)
     {
         if (fontAsset == null || string.IsNullOrEmpty(text) || fontAsset.atlasPopulationMode != AtlasPopulationMode.Dynamic)
         {
             return;
         }
 
+        var fontId = fontAsset.GetInstanceID();
+        if (!_addedCharactersByFontId.TryGetValue(fontId, out var addedCharacters))
+        {
+            addedCharacters = new HashSet<char>();
+            _addedCharactersByFontId[fontId] = addedCharacters;
+        }
+
+        _glyphBuffer.Clear();
+        foreach (var ch in text)
+        {
+            if (addedCharacters.Add(ch))
+            {
+                _glyphBuffer.Append(ch);
+            }
+        }
+
+        if (_glyphBuffer.Length == 0)
+        {
+            return;
+        }
+
         try
         {
-            fontAsset.TryAddCharacters(text, out _);
+            var textToAdd = _glyphBuffer.ToString();
+            fontAsset.TryAddCharacters(textToAdd, out var missing);
+            if (!string.IsNullOrEmpty(missing))
+            {
+                foreach (var ch in missing)
+                {
+                    addedCharacters.Remove(ch);
+                }
+            }
         }
         catch (Exception ex)
         {
             CrispChineseFontPlugin.LogSource.LogWarning(
                 $"Failed to add glyphs to '{SafeObjectName(fontAsset)}': {GetBaseMessage(ex)}");
         }
+        finally
+        {
+            _glyphBuffer.Clear();
+        }
     }
 
     private Material GetOrCreateReplacementMaterial(Material originalMaterial, TMP_FontAsset replacementFont, string profileKey, float sharpness)
     {
         var originalId = originalMaterial == null ? 0 : originalMaterial.GetInstanceID();
-        var key = $"{profileKey}:{replacementFont.GetInstanceID()}:{originalId}";
+        var key = (profileKey, replacementFont.GetInstanceID(), originalId);
         if (_replacementMaterials.TryGetValue(key, out var material) && material != null)
         {
             return material;
@@ -1078,14 +1261,14 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
         }
     }
 
-    private bool IsOurReplacementFont(TMP_FontAsset fontAsset)
+    private bool IsOurReplacementFont(TMP_FontAsset fontAsset, int fontId)
     {
         if (fontAsset == null)
         {
             return false;
         }
 
-        if (_replacementFontIds.Contains(fontAsset.GetInstanceID()))
+        if (_replacementFontIds.Contains(fontId))
         {
             return true;
         }
@@ -1275,33 +1458,58 @@ public sealed class CrispChineseFontRuntime : MonoBehaviour
 
 internal static class TextMeshProHooks
 {
-    private static readonly string[] HookMethodNames =
+    // Structural hooks: object became active or its vertices were invalidated. These do NOT imply a
+    // content change, so already-processed text short-circuits cheaply.
+    private static readonly string[] StructuralHookMethodNames =
     {
         "OnEnable",
-        "set_text",
         "SetVerticesDirty",
+    };
+
+    // Content hook: ONLY the `text` property setter. Signals that new characters may need to be added
+    // to the dynamic atlas. IMPORTANT: do NOT patch the `SetText` method family here — under IL2CPP /
+    // Il2CppInterop, patching TMP_Text.SetText re-enters its own managed bridge through
+    // il2cpp_runtime_invoke and recurses until the stack overflows and the game crashes.
+    private static readonly string[] TextChangedHookMethodNames =
+    {
+        "set_text",
     };
 
     internal static int Install(Harmony harmony)
     {
-        var postfix = AccessTools.Method(typeof(TextMeshProHooks), nameof(Postfix));
+        var structuralPostfix = AccessTools.Method(typeof(TextMeshProHooks), nameof(PostfixStructural));
+        var textChangedPostfix = AccessTools.Method(typeof(TextMeshProHooks), nameof(PostfixTextChanged));
         var seen = new HashSet<MethodBase>();
         var patchedCount = 0;
 
         foreach (var type in new[] { typeof(TMP_Text), typeof(TextMeshProUGUI), typeof(TextMeshPro) })
         {
-            foreach (var methodName in HookMethodNames)
-            {
-                foreach (var original in GetDeclaredMethods(type, methodName))
-                {
-                    if (!seen.Add(original))
-                    {
-                        continue;
-                    }
+            patchedCount += PatchDeclaredMethods(harmony, type, StructuralHookMethodNames, structuralPostfix, seen);
+            patchedCount += PatchDeclaredMethods(harmony, type, TextChangedHookMethodNames, textChangedPostfix, seen);
+        }
 
-                    harmony.Patch(original, postfix: new HarmonyMethod(postfix));
-                    patchedCount++;
+        return patchedCount;
+    }
+
+    private static int PatchDeclaredMethods(
+        Harmony harmony,
+        Type type,
+        IEnumerable<string> methodNames,
+        MethodInfo postfix,
+        HashSet<MethodBase> seen)
+    {
+        var patchedCount = 0;
+        foreach (var methodName in methodNames)
+        {
+            foreach (var original in GetDeclaredMethods(type, methodName))
+            {
+                if (!seen.Add(original))
+                {
+                    continue;
                 }
+
+                harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+                patchedCount++;
             }
         }
 
@@ -1310,13 +1518,22 @@ internal static class TextMeshProHooks
 
     private static IEnumerable<MethodInfo> GetDeclaredMethods(Type type, string methodName)
     {
-        return type
-            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
-            .Where(method => method.Name == methodName);
+        foreach (var method in type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+        {
+            if (method.Name == methodName)
+            {
+                yield return method;
+            }
+        }
     }
 
-    private static void Postfix(TMP_Text __instance)
+    private static void PostfixStructural(TMP_Text __instance)
     {
-        CrispChineseFontRuntime.QueueFromHook(__instance);
+        CrispChineseFontRuntime.QueueFromHook(__instance, false);
+    }
+
+    private static void PostfixTextChanged(TMP_Text __instance)
+    {
+        CrispChineseFontRuntime.QueueFromHook(__instance, true);
     }
 }
